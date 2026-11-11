@@ -1,14 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { Pass } from 'three/addons/postprocessing/Pass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { mulberry32, seedNoise } from './noise.js';
-import { buildIsland, topH, inside } from './island.js';
+import { buildIsland, bakeWall, topH, inside } from './island.js';
 import { Mycelium, FOOD } from './mycelium.js';
-import { Ecosystem } from './flora.js';
+import { Ecosystem, bakeMoss } from './flora.js';
 import { Atmosphere } from './atmosphere.js';
 
 const params = new URLSearchParams(location.search);
@@ -24,7 +24,10 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPrefer
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-let dpr = Math.min(window.devicePixelRatio || 1, LOW ? 1 : 1.75);
+renderer.shadowMap.autoUpdate = false; // refreshed every other frame in the loop
+// never shade more than ~2.2 megapixels, whatever the screen: the soft lens look hides the difference
+const MAX_PIXELS = LOW ? 1.2e6 : 2.2e6;
+let dprCap = LOW ? 1 : 1.5, dpr = 1;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(30, 1, 0.5, 200);
@@ -38,16 +41,22 @@ controls.minPolarAngle = 0.25; controls.maxPolarAngle = 2.05;
 controls.rotateSpeed = 0.6; controls.zoomSpeed = 0.7;
 controls.autoRotateSpeed = 0.3;
 
-const U = { uTime: { value: 0 }, uNight: { value: 0 }, uVital: { value: null }, uScale: { value: 600 } };
+const U = {
+  uTime: { value: 0 }, uNight: { value: 0 }, uVital: { value: null }, uScale: { value: 600 },
+  uBake: { value: null }, uMossBake: { value: null }, uNoiseTex: { value: null },
+};
 
 // ---------------------------------------------------------------- world ----
 
 const island = buildIsland(U, rnd);
 scene.add(island.group);
-const eco = new Ecosystem(island, U, rnd, { shells: LOW ? 8 : 14, tufts: LOW ? 2000 : 4200 });
+U.uBake.value = bakeWall(renderer, island.wall);
+{ const m = bakeMoss(renderer); U.uMossBake.value = m.bake; U.uNoiseTex.value = m.noise; }
+const eco = new Ecosystem(island, U, rnd, { shells: LOW ? 7 : 10, tufts: LOW ? 2000 : 3600 });
 island.group.add(eco.group);
 const atm = new Atmosphere(scene, island.group, U);
 eco.fx = atm;
+atm.bakeBackdrop(renderer);
 
 const _v = new THREE.Vector3();
 const myc = new Mycelium(rnd, {
@@ -60,13 +69,16 @@ island.group.add(myc.mesh, myc.points);
 
 // ------------------------------------------------------- post-processing ----
 
-const rt = new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, samples: LOW ? 0 : 4, depthTexture: new THREE.DepthTexture(4, 4) });
-const composer = new EffectComposer(renderer, rt);
-// the composer clones the target, and a cloned depth texture shares its GPU texture: give the second its own
-composer.renderTarget2.depthTexture = new THREE.DepthTexture(4, 4);
-composer.addPass(new RenderPass(scene, camera));
+// The scene is drawn once into its own anti-aliased target; the lens pass reads it
+// (colour + depth) and everything after that runs on plain, cheaper buffers.
+const sceneRT = new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, samples: LOW ? 0 : 4, depthTexture: new THREE.DepthTexture(4, 4) });
+const composer = new EffectComposer(renderer);
+class ScenePass extends Pass {
+  constructor() { super(); this.needsSwap = false; }
+  render(r) { r.setRenderTarget(sceneRT); r.render(scene, camera); }
+}
+composer.addPass(new ScenePass());
 const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.45, 0.75, 1.0);
-composer.addPass(bloom);
 const lens = new ShaderPass({
   uniforms: {
     tDiffuse: { value: null }, tDepth: { value: null }, uNear: { value: camera.near }, uFar: { value: camera.far },
@@ -87,8 +99,8 @@ const lens = new ShaderPass({
       float c = coc(vUv)*uAmount;
       vec3 acc = texture2D(tDiffuse, vUv).rgb; float wsum = 1.0;
       if (c > 0.4) {
-        for (int i = 1; i <= 22; i++) {
-          float fi = float(i), r = sqrt(fi/22.0)*c, a = fi*2.39996;
+        for (int i = 1; i <= 12; i++) {
+          float fi = float(i), r = sqrt(fi/12.0)*c, a = fi*2.39996;
           vec2 uv = vUv + vec2(cos(a), sin(a))*r*px/uRes;
           float w = clamp(coc(uv)*uAmount/max(r, 0.5), 0.12, 1.0);
           acc += texture2D(tDiffuse, uv).rgb*w; wsum += w;
@@ -100,14 +112,19 @@ const lens = new ShaderPass({
       col *= 1.0 + (hash(gl_FragCoord.xy + fract(uTime)*91.7) - 0.5)*0.055;
       gl_FragColor = vec4(col, 1.0);
     }`,
-});
+}, 'tNone');
+lens.uniforms.tDiffuse.value = sceneRT.texture;
+lens.uniforms.tDepth.value = sceneRT.depthTexture;
 composer.addPass(lens);
+composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
+  dpr = Math.min(window.devicePixelRatio || 1, dprCap, Math.sqrt(MAX_PIXELS / (w * h)));
   renderer.setPixelRatio(dpr); renderer.setSize(w, h, false);
   composer.setSize(Math.round(w * dpr), Math.round(h * dpr));
+  sceneRT.setSize(Math.round(w * dpr), Math.round(h * dpr));
   camera.aspect = w / h;
   camera.fov = camera.aspect < 1.25 ? Math.min(62, 30 * Math.pow(1.25 / camera.aspect, 0.85)) : 30;
   camera.updateProjectionMatrix();
@@ -134,7 +151,7 @@ eco.seedInitial(simT);
 let tool = 'sap', soilView = false, placed = 0;
 const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
 let hover = null, hoverDirty = false, down = null, lastInput = performance.now();
-const targets = [island.ground, island.wall];
+const targets = [island.pickGround, island.pickWall];
 
 function pick(ev) {
   const r = canvas.getBoundingClientRect();
@@ -146,7 +163,8 @@ function pick(ev) {
 function feed(hit, type = tool) {
   const p = island.group.worldToLocal(hit.point.clone()), n = hit.face.normal;
   const to = p.clone(), from = p.clone();
-  if (hit.object === island.ground) {
+  if (hit.object === island.pickGround) {
+    p.y = topH(p.x, p.z);
     let d = 0.35 + rnd() * 0.65;
     to.y = p.y - d;
     for (let k = 0; k < 10 && !inside(to.x, to.y, to.z, 0.14); k++) { d *= 0.8; to.set(p.x * (1 - 0.06 * k), p.y - d, p.z * (1 - 0.06 * k)); }
@@ -204,20 +222,32 @@ window.addEventListener('keydown', (e) => {
 if (params.get('night') === '1') { atm.night = atm.nightTarget = 1; atm.apply(1); $('btn-night').textContent = 'Day'; }
 function feedAt(x, z, type) {
   const p = new THREE.Vector3(x, topH(x, z), z);
-  return feed({ point: island.group.localToWorld(p.clone()), face: { normal: new THREE.Vector3(0, 1, 0) }, object: island.ground }, type);
+  return feed({ point: island.group.localToWorld(p.clone()), face: { normal: new THREE.Vector3(0, 1, 0) }, object: island.pickGround }, type);
 }
 {
   const n = parseInt(params.get('feed') || '0', 10), ff = parseFloat(params.get('t') || '0');
   for (let i = 0; i < n; i++) { const a = rnd() * 6.283, r = 0.4 + rnd() * 1.4; feedAt(Math.cos(a) * r, Math.sin(a) * r, i % 2 ? 'dew' : 'sap'); }
   for (let i = 0; i < ff * 16; i++) step();
 }
-window.microcosm = { myc, eco, atm, camera, controls, feedAt, setSoil, setNight, step, get simT() { return simT; } };
+window.microcosm = { scene, island, renderer, lens, bloom, get quality() { return { dpr, level: perf.level }; }, myc, eco, atm, camera, controls, feedAt, setSoil, setNight, step, get simT() { return simT; } };
 
 // ----------------------------------------------------------------- loop ----
 
 const clock = new THREE.Clock();
 const center = new THREE.Vector3();
-let slow = 0, readoutT = 0;
+let readoutT = 0, frameN = 0;
+// Quality steps down, one notch at a time, whenever a 1.5 s window averages under ~45 fps.
+const perf = { t: 0, n: 0, level: 0, grace: 2 };
+function degrade() {
+  const l = ++perf.level;
+  if (l === 1) dprCap = Math.min(dpr, 1.2) * 0.85;
+  else if (l === 2) dprCap *= 0.85;
+  else if (l === 3) { lens.uniforms.uAmount.value = 0; eco.shells.count = Math.min(eco.shells.count, 7); }
+  else if (l === 4) dprCap *= 0.8;
+  else if (l === 5) { dprCap *= 0.8; eco.shells.count = Math.min(eco.shells.count, 5); }
+  else return;
+  resize();
+}
 const readout = $('readout'), ringSap = $('ring-sap'), ringDew = $('ring-dew');
 
 function frame() {
@@ -257,9 +287,9 @@ function frame() {
 
   renderer.toneMappingExposure = atm.exposure;
   bloom.strength = atm.bloom + (soilView ? 0.25 : 0);
-  lens.uniforms.tDepth.value = composer.readBuffer.depthTexture;
   lens.uniforms.uFocus.value = camera.position.distanceTo(controls.target);
   lens.uniforms.uTime.value = real;
+  if ((frameN++ & 1) === 0) renderer.shadowMap.needsUpdate = true;
   composer.render(dt);
 
   readoutT += dt;
@@ -272,8 +302,13 @@ function frame() {
   }
 
   // ease off the resolution if the machine is struggling
-  slow = dt > 0.034 ? slow + dt : Math.max(0, slow - dt * 2);
-  if (slow > 4 && dpr > 1) { dpr = Math.max(1, dpr - 0.25); slow = 0; resize(); }
+  if (!document.hidden) {
+    perf.t += dt; perf.n++;
+    if (perf.t >= 1.5) {
+      const avg = perf.t / perf.n; perf.t = 0; perf.n = 0;
+      if (perf.grace > 0) perf.grace--; else if (avg > 0.022 && !params.has('lock')) { degrade(); perf.grace = 1; }
+    }
+  }
 }
 frame();
 document.body.classList.add('ready');

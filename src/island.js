@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { noise3, fbm3, mulberry32, smooth } from './noise.js';
-import { patchStandard } from './glsl.js';
+import { patchStandard, NOISE } from './glsl.js';
 
 export const R = 2.35;      // nominal island radius
 export const DEPTH = 2.6;   // rim to lowest tip
@@ -52,8 +52,8 @@ export function inside(x, y, z, m = 0.06) {
 
 // ------------------------------------------------------------- geometry ----
 
-function buildTop() {
-  const NR = 60, NT = 240, pos = [], idx = [];
+function buildTop(NR = 60, NT = 240) {
+  const pos = [], idx = [];
   pos.push(0, topH(0, 0), 0);
   for (let i = 1; i <= NR; i++) {
     const q = Math.pow(i / NR, 0.85);
@@ -77,8 +77,8 @@ function buildTop() {
   return g;
 }
 
-function buildWall() {
-  const NU = 96, NT = 240, pos = [], dep = [], idx = [];
+function buildWall(NU = 96, NT = 240) {
+  const pos = [], dep = [], uvs = [], idx = [];
   for (let j = 0; j <= NT; j++) {
     const th = ((j % NT) / NT) * TAU, c = Math.cos(th), s = Math.sin(th);
     const o = outline(th), rimY = topH(o * c, o * s), D = depthAt(c, s);
@@ -86,7 +86,7 @@ function buildWall() {
       const u = k / NU;
       const r = k === 0 ? o : o * profile(u, c, s);
       pos.push(r * c, rimY - u * D, r * s);
-      dep.push(u * D);
+      dep.push(u * D); uvs.push(j / NT, u);
     }
   }
   const W = NU + 1;
@@ -99,6 +99,7 @@ function buildWall() {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('aDepth', new THREE.Float32BufferAttribute(dep, 1));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   g.setIndex(idx);
   g.computeVertexNormals();
   // weld the seam normals
@@ -139,13 +140,9 @@ function rockGeo(seed) {
 
 const INV = (1 / (2 * RG)).toFixed(5);
 
-function wallMaterial(U) {
-  const m = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
-  return patchStandard(m, 'wall', {
-    vertPars: 'attribute float aDepth; varying float vDepth;',
-    vert: 'vDepth = aDepth;',
-    fragPars: 'varying float vDepth;',
-    color: /* glsl */ `
+// The cross-section shading is costly (two 3D Voronoi lookups per pixel), so it is
+// painted once into a texture at start-up and only sampled at run time.
+const WALL_COLOR = /* glsl */ `
       vec3 q = vPos;
       float d = vDepth + 0.18*(fbm(q*1.4)-0.5)*smoothstep(0.0,0.3,vDepth);
       float grain = dnoise(q, 46.0), grain2 = dnoise(q+3.1, 105.0);
@@ -175,7 +172,33 @@ function wallMaterial(U) {
       col += vec3(0.5,0.45,0.35)*step(0.968,grain2)*b2*0.45;
       col *= mix(0.45,1.0,smoothstep(0.0,0.2,vDepth));
       col *= mix(1.0,0.85,smoothstep(1.4,2.6,vDepth));
-      diffuseColor.rgb = col;`,
+      diffuseColor.rgb = col;`;
+
+export function bakeWall(renderer, wall) {
+  const rt = new THREE.WebGLRenderTarget(4096, 1024, {
+    type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter,
+    magFilter: THREE.LinearFilter, wrapS: THREE.RepeatWrapping, depthBuffer: false,
+  });
+  rt.texture.anisotropy = 4;
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide, depthTest: false,
+    vertexShader: 'attribute float aDepth; varying float vDepth; varying vec3 vPos; void main(){ vDepth = aDepth; vPos = position; gl_Position = vec4(uv*2.0-1.0, 0.0, 1.0); }',
+    fragmentShader: `varying float vDepth; varying vec3 vPos;\n${NOISE}\nvoid main(){ vec4 diffuseColor = vec4(1.0);\n${WALL_COLOR}\ngl_FragColor = vec4(diffuseColor.rgb, clamp((hgt+2.0)/5.0, 0.0, 1.0)); }`,
+  });
+  const mesh = new THREE.Mesh(wall.geometry, mat); mesh.frustumCulled = false;
+  const sc = new THREE.Scene(); sc.add(mesh);
+  renderer.setRenderTarget(rt); renderer.render(sc, new THREE.Camera()); renderer.setRenderTarget(null);
+  mat.dispose();
+  return rt.texture;
+}
+
+function wallMaterial(U) {
+  const m = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
+  return patchStandard(m, 'wall', {
+    vertPars: 'attribute float aDepth; varying float vDepth; varying vec2 vUvW;',
+    vert: 'vDepth = aDepth; vUvW = uv;',
+    fragPars: 'varying float vDepth; varying vec2 vUvW; uniform sampler2D uBake;',
+    color: 'vec4 bk = texture2D(uBake, vUvW); diffuseColor.rgb = bk.rgb; float hgt = bk.a*5.0-2.0; float b4 = smoothstep(1.46,1.58,vDepth);',
     rough: 'roughnessFactor = mix(0.96, 0.74, b4);',
     normal: 'normal = bumpN(normal, hgt, 0.014);',
   }, U);
@@ -212,8 +235,8 @@ function rockMaterial(U) {
       col = mix(col, vec3(0.20,0.22,0.26), smoothstep(0.45,0.7,fbm(q*0.8+5.0)));
       col *= 0.82 + 0.36*n2;
       vec4 vo = voro3(q*1.5);
-      float crack = (1.0 - smoothstep(0.0, 0.09, vo.y - vo.x))*step(0.45, vo.w);
-      col *= 1.0 - 0.42*crack;
+      float crack = (1.0 - smoothstep(0.0, 0.05, vo.y - vo.x))*step(0.6, vo.w)*smoothstep(0.35, 0.6, n2);
+      col *= 1.0 - 0.3*crack;
       float lich = smoothstep(0.34,0.2,vo.x + 0.15*n2)*step(0.7,vo.z);
       col = mix(col, mix(vec3(0.50,0.52,0.36), vec3(0.62,0.53,0.28), vo.w), lich*0.7);
       vec4 vt = texture2D(uVital, vLPos.xz*${INV}+0.5);
@@ -263,8 +286,12 @@ export function buildIsland(U, rnd) {
   const ground = new THREE.Mesh(buildTop(), groundMaterial(U));
   ground.receiveShadow = true;
   const wall = new THREE.Mesh(buildWall(), wallMaterial(U));
-  wall.receiveShadow = true; wall.castShadow = true;
+  wall.receiveShadow = true;
   group.add(ground, wall);
+  // coarse stand-ins for mouse picking, so hovering never ray-tests the full meshes
+  const pickGround = new THREE.Mesh(buildTop(14, 48)), pickWall = new THREE.Mesh(buildWall(18, 48));
+  pickGround.visible = pickWall.visible = false;
+  group.add(pickGround, pickWall);
 
   // --- rocks: three shapes, instanced everywhere ---------------------------
   const rmat = rockMaterial(U);
@@ -414,7 +441,7 @@ export function buildIsland(U, rnd) {
   twigs.castShadow = twigs.receiveShadow = true; twigs.renderOrder = 2;
   group.add(twigs);
 
-  return { group, ground, wall, obstacles };
+  return { group, ground, wall, pickGround, pickWall, obstacles, shellGeometry: buildTop(40, 168) };
 }
 
 export function blocked(obstacles, x, z, pad = 0) {

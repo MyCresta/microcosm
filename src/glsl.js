@@ -60,7 +60,8 @@ vPos = transformed;
   vOrigin = vec3(0.0); vWN = objectNormal; vLPos = transformed;
 #endif`);
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>\n${VARY}${NOISE}${BUMP}${o.fragPars || ''}`)
+      .replace('#include <common>', `#include <common>\n${VARY}${NOISE}${o.fragPars || ''}`)
+      .replace('void main() {', `${BUMP}\nvoid main() {`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${o.fragStart || ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>\n${o.color || ''}`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>\n${o.rough || ''}`)

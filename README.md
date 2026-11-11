@@ -35,7 +35,9 @@ The speed button cycles 1×, 3× and 8×. Left alone, the view slowly turns on i
 
 ## Options
 
-Add to the URL: `?q=low` for a lighter render (no MSAA or depth of field, fewer moss layers), `?seed=123` for a different island, `?night=1` to start at night. The page also lowers its own resolution if frames get slow.
+Add to the URL: `?q=low` for a lighter render (no MSAA or depth of field, fewer moss layers), `?seed=123` for a different island, `?night=1` to start at night.
+
+The page never shades more than about 2.2 megapixels, and if it averages under roughly 45 fps it steps quality down by itself: resolution first, then depth of field and moss layers. `?lock` turns that off.
 
 ## Layout
 

@@ -5,13 +5,33 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { noise3, smooth, clamp } from './noise.js';
-import { patchStandard, patchDepth } from './glsl.js';
+import { patchStandard, patchDepth, NOISE } from './glsl.js';
 import { RG, topH, outline, blocked, randomSurfacePoint } from './island.js';
 
 const TAU = Math.PI * 2;
 const G = 64;
 const INV = (1 / (2 * RG)).toFixed(5);
 const MOSS_H = 0.07;
+
+/** Static moss fields (patchiness, cushions, fine relief) painted once, plus a tiling noise for the fibres. */
+export function bakeMoss(renderer) {
+  const rt = new THREE.WebGLRenderTarget(1024, 1024, { depthBuffer: false });
+  const mat = new THREE.ShaderMaterial({
+    depthTest: false,
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: `varying vec2 vUv;\n${NOISE}\nvoid main(){ vec2 mp = (vUv-0.5)*${(2 * RG).toFixed(3)};
+      gl_FragColor = vec4(fbm(vec3(mp*1.3, 1.7)), smoothstep(0.2, 0.8, vnoise(vec3(mp*4.6, 3.0))), vnoise(vec3(mp*31.0, 3.0)), 1.0); }`,
+  });
+  const sc = new THREE.Scene(), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  quad.frustumCulled = false; sc.add(quad);
+  renderer.setRenderTarget(rt); renderer.render(sc, new THREE.Camera()); renderer.setRenderTarget(null);
+  mat.dispose(); quad.geometry.dispose();
+  const N = 256, data = new Uint8Array(N * N * 4);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 256) | 0;
+  const noise = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+  noise.wrapS = noise.wrapT = THREE.RepeatWrapping; noise.magFilter = noise.minFilter = THREE.LinearFilter; noise.needsUpdate = true;
+  return { bake: rt.texture, noise };
+}
 
 // ------------------------------------------------------------ geometry ----
 
@@ -81,7 +101,7 @@ function cloverGeo() {
 
 function tuftGeo() {
   const pos = [], col = [];
-  const B = 6, K = 4;
+  const B = 5, K = 3;
   for (let b = 0; b < B; b++) {
     const a = (b / B) * TAU + 0.4 * Math.sin(b * 7.1), lean = 0.55 + 0.5 * Math.abs(Math.sin(b * 3.3)), h = 0.05 + 0.03 * Math.abs(Math.cos(b * 5.7));
     const ca = Math.cos(a), sa = Math.sin(a), w = 0.0075;
@@ -293,26 +313,27 @@ export class Ecosystem {
     this._upload();
 
     // --- moss: shell layers over the ground ------------------------------
-    const SHELLS = opts.shells || 14;
-    const sg = island.ground.geometry.clone();
+    const SHELLS = opts.shells || 10;
+    const sg = island.shellGeometry;
     const sh = new Float32Array(SHELLS);
     for (let i = 0; i < SHELLS; i++) sh[i] = 1 - i / SHELLS; // top first for early-z
     sg.setAttribute('aShell', new THREE.InstancedBufferAttribute(sh, 1));
-    const mossMat = patchStandard(new THREE.MeshStandardMaterial({ roughness: 0.9 }), 'moss', {
+    const mossMat = patchStandard(new THREE.MeshLambertMaterial(), 'moss', {
       vertPars: 'attribute float aShell; varying float vShell; varying vec3 vBase; uniform float uTime;',
       vert: `vShell = aShell; vBase = position;
         float mw = sin(uTime*1.1 + position.x*2.3 + position.z*1.9) + sin(uTime*0.7 + position.z*3.1);
         transformed += objectNormal*aShell*${MOSS_H} + vec3(mw, 0.0, mw*0.6)*0.0035*aShell*aShell;`,
-      fragPars: 'varying float vShell; varying vec3 vBase; uniform sampler2D uVital; uniform float uNight;',
+      fragPars: 'varying float vShell; varying vec3 vBase; uniform sampler2D uVital, uMossBake, uNoiseTex; uniform float uNight;',
       fragStart: /* glsl */ `
-        vec2 mp = vBase.xz;
-        vec4 vt = texture2D(uVital, mp*${INV}+0.5);
-        float patchN = fbm(vec3(mp*1.3, 1.7));
-        float cush = smoothstep(0.2, 0.8, vnoise(vec3(mp*4.6, 3.0)));
+        vec2 mp = vBase.xz, muv = mp*${INV}+0.5;
+        vec4 vt = texture2D(uVital, muv);
+        vec4 mb = texture2D(uMossBake, muv);
+        float patchN = mb.r, cush = mb.g;
         float mossH = vt.r*(0.35+0.65*cush)*smoothstep(0.2, 0.5, patchN*0.8 + vt.r*0.6);
+        mossH = mossH < 0.05 ? 0.0 : 0.28 + 0.72*mossH; // where moss grows at all, it has some body
         float mtip = vShell/max(mossH, 1e-3);
         if (mtip > 1.0) discard;
-        float fz = 0.55*vnoise(vec3(mp*95.0, 1.0)) + 0.3*vnoise(vec3(mp*190.0, 7.0)) + 0.15*vnoise(vec3(mp*31.0, 3.0));
+        float fz = 0.55*texture2D(uNoiseTex, mp*(95.0/256.0)).r + 0.3*texture2D(uNoiseTex, mp*(190.0/256.0)+0.37).g + 0.15*mb.b;
         if (fz < 0.1 + 0.6*mtip) discard;
         float mspark = hash21(floor(mp*55.0));`,
       color: /* glsl */ `
@@ -321,20 +342,22 @@ export class Ecosystem {
         mossC = mix(mossC, vec3(mossC.r*0.3, mossC.g*1.05, mossC.g*0.9), vt.g*0.8);
         mossC *= mix(0.45, 1.0, mtip)*(0.55+0.9*fz);
         diffuseColor.rgb = mossC;`,
-      normal: 'normal = bumpN(normal, vnoise(vec3(mp*31.0, 3.0)) + cush, 0.012);',
+      normal: 'normal = bumpN(normal, mb.b + cush, 0.012);',
       emissive: `totalEmissiveRadiance += vec3(0.08,0.75,0.62)*vt.g*step(0.86,mspark)*pow(mtip,3.0)*mix(0.25,1.3,uNight);`,
-    }, { uVital: U.uVital, uTime: U.uTime, uNight: U.uNight });
+    }, { uVital: U.uVital, uTime: U.uTime, uNight: U.uNight, uMossBake: U.uMossBake, uNoiseTex: U.uNoiseTex });
+    this.shells = null;
     const shells = new THREE.InstancedMesh(sg, mossMat, SHELLS);
     for (let i = 0; i < SHELLS; i++) shells.setMatrixAt(i, _m.identity());
     shells.receiveShadow = true; shells.renderOrder = 2; shells.frustumCulled = false;
+    this.shells = shells;
     this.group.add(shells);
 
     // --- tufts ------------------------------------------------------------
-    const NT = opts.tufts || 4200;
+    const NT = opts.tufts || 3600;
     const tg = tuftGeo();
     const tr = new Float32Array(NT * 3);
     tg.setAttribute('aRnd', new THREE.InstancedBufferAttribute(tr, 3));
-    const tuftMat = patchStandard(new THREE.MeshStandardMaterial({ roughness: 0.75, vertexColors: true, side: THREE.DoubleSide }), 'tuft', {
+    const tuftMat = patchStandard(new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }), 'tuft', {
       vertPars: 'attribute vec3 aRnd; uniform sampler2D uVital; uniform float uTime; varying vec3 vTuft;',
       vert: `vec3 tio = instanceMatrix[3].xyz;
         vec4 tvt = texture2D(uVital, tio.xz*${INV}+0.5);

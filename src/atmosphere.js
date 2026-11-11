@@ -35,7 +35,7 @@ export class Atmosphere {
 
     // a few point lights that follow the brightest glowing growth
     this.glow = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 2; i++) {
       const l = new THREE.PointLight(0x40e8ff, 0, 1.7, 1.8);
       island.add(l); this.glow.push(l);
     }
@@ -43,15 +43,33 @@ export class Atmosphere {
     // backdrop
     this.bgU = {
       uTop: { value: C(0, 0, 0) }, uMid: { value: C(0, 0, 0) }, uBot: { value: C(0, 0, 0) },
-      uBokA: { value: C(0, 0, 0) }, uBokB: { value: C(0, 0, 0) }, uTime: U.uTime, uSun: { value: new THREE.Vector3() }, uSunC: { value: C(0, 0, 0) },
+      uBokA: { value: C(0, 0, 0) }, uBokB: { value: C(0, 0, 0) }, uBokeh: { value: null }, uSun: { value: new THREE.Vector3() }, uSunC: { value: C(0, 0, 0) },
     };
     const bg = new THREE.Mesh(new THREE.SphereGeometry(70, 48, 32), new THREE.ShaderMaterial({
       uniforms: this.bgU, side: THREE.BackSide, depthWrite: false, depthTest: false,
       vertexShader: 'varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
       fragmentShader: /* glsl */ `
-        varying vec3 vDir; uniform vec3 uTop,uMid,uBot,uBokA,uBokB,uSun,uSunC; uniform float uTime;
-        ${NOISE}
-        float layer(vec2 uv, vec2 cells, float seed){
+        varying vec3 vDir; uniform vec3 uTop,uMid,uBot,uBokA,uBokB,uSun,uSunC; uniform sampler2D uBokeh;
+        void main(){
+          vec3 d = normalize(vDir);
+          vec3 col = mix(uBot, uMid, smoothstep(-0.85, 0.0, d.y));
+          col = mix(col, uTop, smoothstep(-0.05, 0.85, d.y));
+          float sunAmt = pow(max(dot(d, uSun), 0.0), 2.0);
+          col += uSunC*sunAmt*0.3;
+          vec4 bok = texture2D(uBokeh, vec2(atan(d.z, d.x)/6.2831853 + 0.5, d.y*0.5 + 0.5));
+          float mask = (1.0 - smoothstep(0.55, 0.95, abs(d.y)))*(0.38 + 1.1*sunAmt)*2.0;
+          col *= 0.9 + 0.2*bok.b;
+          col += (uBokA*bok.r + uBokB*bok.g)*mask;
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+    }));
+    // the out-of-focus discs are painted once into a panorama instead of being recomputed every frame
+    this.bakeBackdrop = (renderer) => {
+      const rt = new THREE.WebGLRenderTarget(2048, 1024, { depthBuffer: false, wrapS: THREE.RepeatWrapping });
+      const mat = new THREE.ShaderMaterial({
+        depthTest: false,
+        vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+        fragmentShader: `varying vec2 vUv;\n${NOISE}\nfloat layer(vec2 uv, vec2 cells, float seed){
           vec2 g = uv*cells; vec2 id = floor(g); float acc = 0.0;
           for(int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){
             vec2 c = id + vec2(float(x),float(y)); vec2 cw = vec2(mod(c.x, cells.x), c.y);
@@ -61,27 +79,20 @@ export class Atmosphere {
             float rad = 0.22 + 0.3*hash21(cw + seed*3.0);
             float d = length(g - ctr);
             float disc = smoothstep(rad, rad*0.8, d)*(0.7 + 0.3*smoothstep(rad*0.5, rad*0.85, d));
-            acc += disc*show*(0.55 + 0.45*sin(uTime*(0.25+h.x*0.5) + h.y*6.28))*(0.25 + 0.75*h.y);
+            acc += disc*show*(0.3 + 0.7*h.y)*(0.6 + 0.4*h.x);
           }
           return acc;
-        }
-        void main(){
-          vec3 d = normalize(vDir);
-          vec3 col = mix(uBot, uMid, smoothstep(-0.85, 0.0, d.y));
-          col = mix(col, uTop, smoothstep(-0.05, 0.85, d.y));
-          col *= 0.85 + 0.3*fbm(d*2.2 + 3.0);
-          vec2 uv = vec2(atan(d.z, d.x)/6.2831853 + 0.5, d.y*0.5 + 0.5);
-          float mask = 1.0 - smoothstep(0.55, 0.95, abs(d.y));
-          float sunAmt = pow(max(dot(d, uSun), 0.0), 2.0);
-          col += uSunC*sunAmt*0.3;
-          float bk = 0.38 + 1.1*sunAmt;
-          col += uBokA*layer(uv, vec2(16.0, 8.0), 1.0)*0.15*mask*bk;
-          col += uBokB*layer(uv, vec2(26.0, 13.0), 5.0)*0.12*mask*bk;
-          col += uBokA*layer(uv, vec2(9.0, 5.0), 9.0)*0.06*mask*bk;
-          col += mix(uBokA, uBokB, 0.5)*layer(uv, vec2(48.0, 24.0), 13.0)*0.1*mask*bk;
-          gl_FragColor = vec4(col, 1.0);
-        }`,
-    }));
+        }\nvoid main(){
+          float a = layer(vUv, vec2(16.0, 8.0), 1.0)*0.15 + layer(vUv, vec2(9.0, 5.0), 9.0)*0.06;
+          float b = layer(vUv, vec2(26.0, 13.0), 5.0)*0.12;
+          gl_FragColor = vec4(a*0.5, b*0.5, vnoise(vec3(vUv*vec2(12.0, 6.0), 3.0)), 1.0); }`,
+      });
+      const sc = new THREE.Scene(), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      quad.frustumCulled = false; sc.add(quad);
+      renderer.setRenderTarget(rt); renderer.render(sc, new THREE.Camera()); renderer.setRenderTarget(null);
+      mat.dispose(); quad.geometry.dispose();
+      this.bgU.uBokeh.value = rt.texture;
+    };
     bg.renderOrder = -10; bg.frustumCulled = false;
     scene.add(bg);
 
