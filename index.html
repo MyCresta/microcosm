@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Microcosm</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --ink: #efe9d8;
+    --ink-soft: rgba(239, 233, 216, 0.62);
+    --amber: #ffab3d;
+    --dew: #58dcff;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #07100d; color: var(--ink); font-family: var(--serif); }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; opacity: 0; transition: opacity 1.6s ease; }
+  .ready #scene { opacity: 1; }
+
+  .ui { position: fixed; z-index: 2; pointer-events: none; text-shadow: 0 1px 12px rgba(0, 0, 0, 0.55); }
+  .ui > * { pointer-events: auto; }
+
+  .mark { left: max(22px, env(safe-area-inset-left)); bottom: max(20px, env(safe-area-inset-bottom)); }
+  .mark h1 { margin: 0; font-size: 25px; font-weight: 400; font-style: italic; letter-spacing: 0.01em; }
+  .mark p { margin: 3px 0 0; font-size: 13.5px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+  .view { right: max(22px, env(safe-area-inset-right)); top: max(18px, env(safe-area-inset-top)); display: flex; gap: 20px; }
+  .view button { font: inherit; font-size: 14.5px; color: var(--ink-soft); background: none; border: 0; padding: 6px 0; cursor: pointer; border-bottom: 1px solid transparent; transition: color 0.2s, border-color 0.2s; }
+  .view button:hover, .view button[aria-pressed="true"] { color: var(--ink); border-bottom-color: rgba(239, 233, 216, 0.5); }
+
+  .feed { left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .hint { margin: 0; font-size: 14.5px; font-style: italic; color: var(--ink-soft); transition: opacity 1.2s ease; white-space: nowrap; }
+  .fed .hint { opacity: 0; }
+  .tools { display: flex; gap: 26px; }
+  .tool { font: inherit; color: var(--ink-soft); background: none; border: 0; padding: 0; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13.5px; transition: color 0.2s; }
+  .tool[aria-pressed="true"] { color: var(--ink); }
+  /* the ring around each drop fills with how much of that food the network is holding */
+  .drop { --fill: 0; --c: var(--amber); width: 46px; height: 46px; border-radius: 50%; position: relative; display: grid; place-items: center;
+    background: conic-gradient(var(--c) calc(var(--fill) * 360deg), rgba(239, 233, 216, 0.16) 0); transition: transform 0.2s ease; }
+  .drop::before { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: rgba(8, 16, 13, 0.82); }
+  .drop::after { content: ""; position: relative; width: 16px; height: 16px; border-radius: 50%;
+    background: radial-gradient(circle at 38% 34%, #fff, var(--c) 45%, transparent 72%); box-shadow: 0 0 14px 2px var(--c); opacity: 0.55; transition: opacity 0.2s, transform 0.2s; }
+  .tool[aria-pressed="true"] .drop { transform: scale(1.08); }
+  .tool[aria-pressed="true"] .drop::after { opacity: 1; transform: scale(1.2); }
+  #ring-dew { --c: var(--dew); }
+
+  button:focus-visible { outline: 1.5px solid var(--ink); outline-offset: 5px; border-radius: 3px; }
+  .fallback { position: fixed; inset: 0; display: none; place-items: center; padding: 32px; text-align: center; font-size: 17px; line-height: 1.5; color: var(--ink-soft); }
+  .failed .fallback { display: grid; }
+  @media (max-width: 560px) { .mark h1 { font-size: 20px; } .mark { bottom: auto; top: max(14px, env(safe-area-inset-top)); } .view { gap: 14px; } .view button { font-size: 13.5px; } }
+  @media (prefers-reduced-motion: reduce) { #scene, .hint, .drop { transition: none; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js", "three/addons/": "./vendor/addons/" } }
+</script>
+</head>
+<body>
+<canvas id="scene" aria-label="A floating piece of forest floor with a mycelium network growing in the soil"></canvas>
+
+<div class="ui mark">
+  <h1>Microcosm</h1>
+  <p id="readout">&nbsp;</p>
+</div>
+
+<div class="ui view">
+  <button id="btn-soil" aria-pressed="false" title="See the whole network through the soil (X)">Soil view</button>
+  <button id="btn-speed" title="Change how fast time passes (Space pauses)">1× speed</button>
+  <button id="btn-night" title="Switch between day and night (N)">Night</button>
+</div>
+
+<div class="ui feed">
+  <p class="hint">Click the moss or the soil to bury food. Drag to look around.</p>
+  <div class="tools">
+    <button class="tool" id="tool-sap" aria-pressed="true" title="Amber sap feeds growth: moss, ferns and russet mushrooms (1)">
+      <span class="drop" id="ring-sap"></span>Sap
+    </button>
+    <button class="tool" id="tool-dew" aria-pressed="false" title="Moon dew wakes the glowing growth: bell caps and lantern stalks (2)">
+      <span class="drop" id="ring-dew"></span>Moon dew
+    </button>
+  </div>
+</div>
+
+<div class="fallback">
+  <p>Microcosm could not start. It needs WebGL 2, and it has to be opened through a local web server rather than as a file. See the README for the one-line command.</p>
+</div>
+
+<script>
+  window.addEventListener('error', () => { if (!document.body.classList.contains('ready')) document.body.classList.add('failed'); });
+  if (location.protocol === 'file:') document.body.classList.add('failed');
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
