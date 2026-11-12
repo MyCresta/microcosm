@@ -219,9 +219,9 @@ function degrade() {
   const l = ++perf.level;
   if (l === 1) dprCap = dpr * 0.85;
   else if (l === 2) { sceneRT.samples = 0; sceneRT.dispose(); lens.uniforms.uAmount.value = 0; }
-  else if (l === 3) { dprCap = dpr * 0.85; eco.shells.count = Math.min(eco.shells.count, 7); }
+  else if (l === 3) { dprCap = dpr * 0.85; eco.setShells(7); }
   else if (l === 4) dprCap = dpr * 0.8;
-  else { dprCap = dpr * 0.8; eco.shells.count = Math.min(eco.shells.count, 5); }
+  else { dprCap = dpr * 0.8; eco.setShells(6); }
   dprCap = Math.max(0.6, dprCap);
   resize();
 }

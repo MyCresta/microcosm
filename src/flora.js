@@ -352,6 +352,7 @@ export class Ecosystem {
     for (let i = 0; i < SHELLS; i++) shells.setMatrixAt(i, _m.identity());
     shells.receiveShadow = true; shells.renderOrder = 2; shells.frustumCulled = false;
     this.shells = shells;
+    this.shellAttr = sg.attributes.aShell;
     this.group.add(shells);
 
     // --- tufts ------------------------------------------------------------
@@ -433,6 +434,15 @@ export class Ecosystem {
     this.mushrooms = [];    // { sp, i, x, z, y, die, ... }
     this.spots = { fern: [], clover: [], lantern: [] };
     this.glowSpots = [];    // positions of light-emitting growth, newest last
+  }
+
+  /** Use fewer moss layers, respaced so they still span the full height of the moss. */
+  setShells(n) {
+    n = Math.min(n, this.shells.count);
+    const a = this.shellAttr.array;
+    for (let i = 0; i < n; i++) a[i] = 1 - i / n; // top first for early-z
+    this.shellAttr.needsUpdate = true;
+    this.shells.count = n;
   }
 
   // --------------------------------------------------------------- fields --
