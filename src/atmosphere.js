@@ -235,7 +235,7 @@ export class Atmosphere {
       this.night += Math.sign(this.nightTarget - this.night) * Math.min(Math.abs(this.nightTarget - this.night), dt / 3.5);
       const n = this.night; this.apply(n * n * (3 - 2 * n));
     }
-    // 'soil view' dims the world so the network reads clearly
+    // optional overall dimming (unused by default)
     this.dim += (this.dimTarget - this.dim) * Math.min(1, dt * 3);
     const k = 1 - 0.7 * this.dim * (1 - 0.45 * this.night);
     this.sun.intensity = this._sunI * k; this.hemi.intensity = this._hemiI * k; this.fill.intensity = this._fillI * k;

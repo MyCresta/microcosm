@@ -1,6 +1,5 @@
-// Everything that lives above ground, and the surface "vitality" fields that
-// tie it to the network below. Hyphae near the surface raise vitality; absorbed
-// food leaves fertile patches. Moss height reads the field directly; ferns,
+// Everything that grows, and the surface "vitality" fields that drive it. The
+// snail's trail and the food it eats leave fertile patches. Moss height reads the field directly; ferns,
 // pennywort, lantern stalks and mushrooms sprout where it is high enough.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -29,7 +28,9 @@ export function bakeMoss(renderer) {
   const N = 256, data = new Uint8Array(N * N * 4);
   for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 256) | 0;
   const noise = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
-  noise.wrapS = noise.wrapT = THREE.RepeatWrapping; noise.magFilter = noise.minFilter = THREE.LinearFilter; noise.needsUpdate = true;
+  noise.wrapS = noise.wrapT = THREE.RepeatWrapping; noise.magFilter = THREE.LinearFilter;
+  // mipmaps make far-off moss resolve to a solid carpet instead of sparkling
+  noise.minFilter = THREE.LinearMipmapLinearFilter; noise.generateMipmaps = true; noise.needsUpdate = true;
   return { bake: rt.texture, noise };
 }
 
@@ -302,7 +303,7 @@ export class Ecosystem {
     for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
       const x = ((i + 0.5) / G - 0.5) * 2 * RG, z = ((j + 0.5) / G - 0.5) * 2 * RG;
       const n = 0.5 + 0.5 * noise3(x * 0.8 + 9, 2.2, z * 0.8 - 4);
-      this.base[j * G + i] = this.vital[j * G + i] = 0.07 + 0.25 * smooth(0.35, 0.8, n);
+      this.base[j * G + i] = this.vital[j * G + i] = 0.2 + 0.26 * smooth(0.35, 0.8, n);
     }
     this.texData = new Uint8Array(G * G * 4);
     this.tex = new THREE.DataTexture(this.texData, G, G, THREE.RGBAFormat);
@@ -310,6 +311,7 @@ export class Ecosystem {
     this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
     U.uVital.value = this.tex;
     this.fieldTimer = 0; this.spawnTimer = 0; this.fruitTimer = 0;
+    this.bankSap = 1.5; this.bankDew = 0; // food in the ground, waiting to fruit
     this._upload();
 
     // --- moss: shell layers over the ground ------------------------------
@@ -470,7 +472,7 @@ export class Ecosystem {
 
   // ----------------------------------------------------------------- tick --
 
-  tick(dt, t, myc) {
+  tick(dt, t) {
     this.fieldTimer += dt;
     if (this.fieldTimer >= 0.25) {
       const d = this.fieldTimer; this.fieldTimer = 0;
@@ -494,44 +496,34 @@ export class Ecosystem {
         const [v, l] = this.sample(x, z);
         if (l > 0.3 && rnd() < 0.16 * l && this._clear('lantern', x, z, 0.26)) this.spawnLantern(x, z, t);
         else if (v > 0.52 && rnd() < 0.1 * v && this._clear('fern', x, z, 0.5)) this.spawnFern(x, z, t, v);
-        else if (v > 0.34 && rnd() < 0.16 * v && this._clear('clover', x, z, 0.24)) this.spawnClover(x, z, t);
+        else if (v > 0.4 && rnd() < 0.14 * v && this._clear('clover', x, z, 0.24)) this.spawnClover(x, z, t);
       }
     }
 
-    // fruiting: the network pushes mushrooms up where it runs shallow
+    // fruiting: mushrooms come up on the richest ground, paid for out of what has been eaten
     this.fruitTimer += dt;
     if (this.fruitTimer > 1.1) {
       this.fruitTimer = 0;
-      let id = -1, bestScore = -1;
-      for (let c = 0; c < 6; c++) { // prefer threads under the richest ground
-        const cand = myc.pickShallowNode(0.42);
-        if (cand < 0) continue;
-        myc.nodePos(cand, _v);
-        const sv = this.sample(_v.x, _v.z), score = sv[0] + sv[1] + rnd() * 0.25;
-        if (score > bestScore) { bestScore = score; id = cand; }
+      let x = 0, z = 0, best = -1;
+      for (let c = 0; c < 6; c++) {
+        const [cx, cz] = randomSurfacePoint(rnd, 0.92), sv = this.sample(cx, cz), score = sv[0] + sv[1] + rnd() * 0.25;
+        if (score > best) { best = score; x = cx; z = cz; }
       }
-      if (id >= 0) {
-        myc.nodePos(id, _v);
-        const x = _v.x + (rnd() - 0.5) * 0.08, z = _v.z + (rnd() - 0.5) * 0.08;
-        if (Math.hypot(x, z) < outline(Math.atan2(z, x)) * 0.93 && !blocked(this.obstacles, x, z, 0)) {
-          const [v, l] = this.sample(x, z), sp0 = this.species[0], sp1 = this.species[1];
-          let sp = null;
-          if (l > 0.25 && myc.bankDew > sp1.cost && rnd() < 0.7) sp = sp1;
-          else if (v > 0.42 && myc.bankSap > sp0.cost && rnd() < 0.6) sp = sp0;
-          else if (v > 0.3 && myc.bankSap > 1.2 && rnd() < 0.3) sp = this.species[2];
-          if (sp && this._mushClear(x, z, sp.gap)) {
-            const n = sp.name === 'pin' ? 3 + ((rnd() * 5) | 0) : 1;
-            let made = 0;
-            for (let c = 0; c < n; c++) {
-              const mx = c ? x + (rnd() - 0.5) * 0.2 : x, mz = c ? z + (rnd() - 0.5) * 0.2 : z;
-              if (c && (!this._mushClear(mx, mz, sp.gap) || blocked(this.obstacles, mx, mz, 0))) continue;
-              if (this.spawnMushroom(sp, mx, mz, t + c * 1.5)) made++;
-            }
-            if (made) {
-              if (sp.blue) myc.bankDew = Math.max(0, myc.bankDew - sp.cost * made); else myc.bankSap = Math.max(0, myc.bankSap - sp.cost * made);
-              myc.feedNode(id, t, sp.blue ? 1 : 0);
-            }
+      if (!blocked(this.obstacles, x, z, 0)) {
+        const [v, l] = this.sample(x, z), sp0 = this.species[0], sp1 = this.species[1];
+        let sp = null;
+        if (l > 0.25 && this.bankDew > sp1.cost && rnd() < 0.7) sp = sp1;
+        else if (v > 0.5 && this.bankSap > sp0.cost && rnd() < 0.6) sp = sp0;
+        else if (v > 0.4 && this.bankSap > 1.2 && rnd() < 0.3) sp = this.species[2];
+        if (sp && this._mushClear(x, z, sp.gap)) {
+          const n = sp.name === 'pin' ? 3 + ((rnd() * 5) | 0) : 1;
+          let made = 0;
+          for (let c = 0; c < n; c++) {
+            const mx = c ? x + (rnd() - 0.5) * 0.2 : x, mz = c ? z + (rnd() - 0.5) * 0.2 : z;
+            if (c && (!this._mushClear(mx, mz, sp.gap) || blocked(this.obstacles, mx, mz, 0))) continue;
+            if (this.spawnMushroom(sp, mx, mz, t + c * 1.5)) made++;
           }
+          if (sp.blue) this.bankDew = Math.max(0, this.bankDew - sp.cost * made); else this.bankSap = Math.max(0, this.bankSap - sp.cost * made);
         }
       }
     }

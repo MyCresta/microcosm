@@ -25,6 +25,7 @@
   .mark h1 { margin: 0; font-size: 25px; font-weight: 400; font-style: italic; letter-spacing: 0.01em; }
   .mark p { margin: 3px 0 0; font-size: 13.5px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 
+  .fps { right: max(22px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom)); font-size: 13.5px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .view { right: max(22px, env(safe-area-inset-right)); top: max(18px, env(safe-area-inset-top)); display: flex; gap: 20px; }
   .view button { font: inherit; font-size: 14.5px; color: var(--ink-soft); background: none; border: 0; padding: 6px 0; cursor: pointer; border-bottom: 1px solid transparent; transition: color 0.2s, border-color 0.2s; }
   .view button:hover, .view button[aria-pressed="true"] { color: var(--ink); border-bottom-color: rgba(239, 233, 216, 0.5); }
@@ -35,7 +36,7 @@
   .tools { display: flex; gap: 26px; }
   .tool { font: inherit; color: var(--ink-soft); background: none; border: 0; padding: 0; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 13.5px; transition: color 0.2s; }
   .tool[aria-pressed="true"] { color: var(--ink); }
-  /* the ring around each drop fills with how much of that food the network is holding */
+  /* the ring around each drop fills with how much of that food is in the ground, waiting to fruit */
   .drop { --fill: 0; --c: var(--amber); width: 46px; height: 46px; border-radius: 50%; position: relative; display: grid; place-items: center;
     background: conic-gradient(var(--c) calc(var(--fill) * 360deg), rgba(239, 233, 216, 0.16) 0); transition: transform 0.2s ease; }
   .drop::before { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: rgba(8, 16, 13, 0.82); }
@@ -56,26 +57,27 @@
 </script>
 </head>
 <body>
-<canvas id="scene" aria-label="A floating piece of forest floor with a mycelium network growing in the soil"></canvas>
+<canvas id="scene" aria-label="A floating piece of forest floor with a snail wandering across the moss"></canvas>
 
 <div class="ui mark">
   <h1>Microcosm</h1>
   <p id="readout">&nbsp;</p>
 </div>
 
+<div class="ui fps" id="fps"></div>
+
 <div class="ui view">
-  <button id="btn-soil" aria-pressed="false" title="See the whole network through the soil (X)">Soil view</button>
   <button id="btn-speed" title="Change how fast time passes (Space pauses)">1× speed</button>
   <button id="btn-night" title="Switch between day and night (N)">Night</button>
 </div>
 
 <div class="ui feed">
-  <p class="hint">Click the moss or the soil to bury food. Drag to look around.</p>
+  <p class="hint">Click the moss to leave food for the snail. Drag to look around.</p>
   <div class="tools">
-    <button class="tool" id="tool-sap" aria-pressed="true" title="Amber sap feeds growth: moss, ferns and russet mushrooms (1)">
+    <button class="tool" id="tool-sap" aria-pressed="true" title="Amber sap: thicker moss, ferns and russet mushrooms where the snail eats and walks (1)">
       <span class="drop" id="ring-sap"></span>Sap
     </button>
-    <button class="tool" id="tool-dew" aria-pressed="false" title="Moon dew wakes the glowing growth: bell caps and lantern stalks (2)">
+    <button class="tool" id="tool-dew" aria-pressed="false" title="Moon dew: the snail's shell lights up and glowing growth follows its trail (2)">
       <span class="drop" id="ring-dew"></span>Moon dew
     </button>
   </div>
