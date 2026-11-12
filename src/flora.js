@@ -320,23 +320,38 @@ export class Ecosystem {
     const sh = new Float32Array(SHELLS);
     for (let i = 0; i < SHELLS; i++) sh[i] = 1 - i / SHELLS; // top first for early-z
     sg.setAttribute('aShell', new THREE.InstancedBufferAttribute(sh, 1));
-    const mossMat = patchStandard(new THREE.MeshLambertMaterial(), 'moss', {
-      vertPars: 'attribute float aShell; varying float vShell; varying vec3 vBase; uniform float uTime;',
+    // The layers are drawn twice. First a bare pass that only decides which fibres
+    // exist and writes depth; then the lit pass, which draws exactly the one visible
+    // fragment per pixel (depth test "equal"), so lighting is never paid for twice.
+    const mossU = { uVital: U.uVital, uTime: U.uTime, uNight: U.uNight, uMossBake: U.uMossBake, uNoiseTex: U.uNoiseTex };
+    const mossVert = {
+      vertPars: 'invariant gl_Position;\nattribute float aShell; varying float vShell; varying float vMossH; varying vec3 vBase; uniform float uTime; uniform sampler2D uVital, uMossBake;',
       vert: `vShell = aShell; vBase = position;
+        // moss height varies slowly, so it is worked out per vertex rather than per pixel per layer
+        vec2 muvV = position.xz*${INV}+0.5; vec4 vtV = texture2D(uVital, muvV); vec4 mbV = texture2D(uMossBake, muvV);
+        float mHV = vtV.r*(0.35+0.65*mbV.g)*smoothstep(0.2, 0.5, mbV.r*0.8 + vtV.r*0.6);
+        vMossH = mHV < 0.05 ? 0.0 : 0.28 + 0.72*mHV; // where moss grows at all, it has some body
         float mw = sin(uTime*1.1 + position.x*2.3 + position.z*1.9) + sin(uTime*0.7 + position.z*3.1);
         transformed += objectNormal*aShell*${MOSS_H} + vec3(mw, 0.0, mw*0.6)*0.0035*aShell*aShell;`,
-      fragPars: 'varying float vShell; varying vec3 vBase; uniform sampler2D uVital, uMossBake, uNoiseTex; uniform float uNight;',
-      fragStart: /* glsl */ `
+      fragPars: 'varying float vShell; varying float vMossH; varying vec3 vBase; uniform sampler2D uVital, uMossBake, uNoiseTex; uniform float uNight;',
+    };
+    const mossFibre = /* glsl */ `
         vec2 mp = vBase.xz, muv = mp*${INV}+0.5;
-        vec4 vt = texture2D(uVital, muv);
+        float mtip = vShell/max(vMossH, 1e-3);
+        MOSS_EARLY
         vec4 mb = texture2D(uMossBake, muv);
-        float patchN = mb.r, cush = mb.g;
-        float mossH = vt.r*(0.35+0.65*cush)*smoothstep(0.2, 0.5, patchN*0.8 + vt.r*0.6);
-        mossH = mossH < 0.05 ? 0.0 : 0.28 + 0.72*mossH; // where moss grows at all, it has some body
-        float mtip = vShell/max(mossH, 1e-3);
-        if (mtip > 1.0) discard;
-        float fz = 0.55*texture2D(uNoiseTex, mp*(95.0/256.0)).r + 0.3*texture2D(uNoiseTex, mp*(190.0/256.0)+0.37).g + 0.15*mb.b;
+        float fz = 0.55*texture2D(uNoiseTex, mp*(95.0/256.0)).r + 0.3*texture2D(uNoiseTex, mp*(190.0/256.0)+0.37).g + 0.15*mb.b;`;
+    const mossPre = patchStandard(new THREE.MeshLambertMaterial({ colorWrite: false }), 'moss-pre', {
+      ...mossVert,
+      fragStart: mossFibre.replace('MOSS_EARLY', 'if (mtip > 1.0) discard;   // above the moss here: nothing to look up') + `
         if (fz < 0.1 + 0.6*mtip) discard;
+        gl_FragColor = vec4(0.0); return;`,
+    }, mossU);
+    const mossMat = patchStandard(new THREE.MeshLambertMaterial({ depthFunc: THREE.EqualDepth, depthWrite: false }), 'moss', {
+      ...mossVert,
+      fragStart: mossFibre.replace('MOSS_EARLY', '') + `
+        vec4 vt = texture2D(uVital, muv);
+        float patchN = mb.r, cush = mb.g;
         float mspark = hash21(floor(mp*55.0));`,
       color: /* glsl */ `
         vec3 mossC = mix(vec3(0.014,0.04,0.01), mix(vec3(0.075,0.19,0.03), vec3(0.15,0.24,0.045), patchN), smoothstep(0.0,0.6,mtip));
@@ -346,14 +361,15 @@ export class Ecosystem {
         diffuseColor.rgb = mossC;`,
       normal: 'normal = bumpN(normal, mb.b + cush, 0.012);',
       emissive: `totalEmissiveRadiance += vec3(0.08,0.75,0.62)*vt.g*step(0.86,mspark)*pow(mtip,3.0)*mix(0.25,1.3,uNight);`,
-    }, { uVital: U.uVital, uTime: U.uTime, uNight: U.uNight, uMossBake: U.uMossBake, uNoiseTex: U.uNoiseTex });
-    this.shells = null;
-    const shells = new THREE.InstancedMesh(sg, mossMat, SHELLS);
-    for (let i = 0; i < SHELLS; i++) shells.setMatrixAt(i, _m.identity());
-    shells.receiveShadow = true; shells.renderOrder = 2; shells.frustumCulled = false;
-    this.shells = shells;
+    }, mossU);
+    const shellsPre = new THREE.InstancedMesh(sg, mossPre, SHELLS), shells = new THREE.InstancedMesh(sg, mossMat, SHELLS);
+    for (const m of [shellsPre, shells]) {
+      for (let i = 0; i < SHELLS; i++) m.setMatrixAt(i, _m.identity());
+      m.frustumCulled = false; this.group.add(m);
+    }
+    shellsPre.renderOrder = 2; shells.renderOrder = 2.5; shells.receiveShadow = true;
+    this.shells = shells; this.shellsPre = shellsPre;
     this.shellAttr = sg.attributes.aShell;
-    this.group.add(shells);
 
     // --- tufts ------------------------------------------------------------
     const NT = opts.tufts || 3600;
@@ -442,7 +458,7 @@ export class Ecosystem {
     const a = this.shellAttr.array;
     for (let i = 0; i < n; i++) a[i] = 1 - i / n; // top first for early-z
     this.shellAttr.needsUpdate = true;
-    this.shells.count = n;
+    this.shells.count = this.shellsPre.count = n;
   }
 
   // --------------------------------------------------------------- fields --

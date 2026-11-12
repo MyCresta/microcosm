@@ -204,22 +204,45 @@ function wallMaterial(U) {
   }, U);
 }
 
-function groundMaterial(U) {
-  const m = new THREE.MeshStandardMaterial({ roughness: 0.96, metalness: 0 });
-  return patchStandard(m, 'ground', {
-    fragPars: 'uniform sampler2D uVital;',
-    color: /* glsl */ `
+// The bare soil is drawn under all of the moss, so its pattern is painted once into a
+// texture too (stored as square roots, to keep the dark tones smooth in 8 bits).
+export function bakeGround(renderer, ground) {
+  const rt = new THREE.WebGLRenderTarget(2048, 2048, { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, depthBuffer: false });
+  rt.texture.anisotropy = 4;
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide, depthTest: false,
+    vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = vec4(position.x/${RG.toFixed(3)}, position.z/${RG.toFixed(3)}, 0.0, 1.0); }`,
+    fragmentShader: `varying vec3 vPos;\n${NOISE}\nvoid main(){
       vec3 q = vPos;
-      float n1=fbm(q*3.0), n2=dnoise(q, 36.0), n3=dnoise(q, 95.0);
+      float n1=fbm(q*3.0), n2=vnoise(q*36.0), n3=vnoise(q*95.0);
       vec3 soil = mix(vec3(0.045,0.030,0.020), vec3(0.125,0.080,0.046), n1);
       soil *= 0.72 + 0.56*n2;
       float fl = step(0.7, vnoise(q*23.0+7.0))*step(0.45,n3);
       soil = mix(soil, vec3(0.24,0.15,0.065), fl*0.55);
-      vec4 vt = texture2D(uVital, q.xz*${INV}+0.5);
-      float mAmt = smoothstep(0.08,0.5, vt.r + (n1-0.5)*0.5);
+      gl_FragColor = vec4(sqrt(soil), (n2*0.5 + n3*0.3 + fl*0.5)/1.3); }`,
+  });
+  const mesh = new THREE.Mesh(ground.geometry, mat); mesh.frustumCulled = false;
+  const sc = new THREE.Scene(); sc.add(mesh);
+  const old = new THREE.Color(); renderer.getClearColor(old); const oldA = renderer.getClearAlpha();
+  renderer.setClearColor(new THREE.Color(0.28, 0.23, 0.18), 0.4);
+  renderer.setRenderTarget(rt); renderer.clear(); renderer.render(sc, new THREE.Camera()); renderer.setRenderTarget(null);
+  renderer.setClearColor(old, oldA);
+  mat.dispose();
+  return rt.texture;
+}
+
+function groundMaterial(U) {
+  const m = new THREE.MeshStandardMaterial({ roughness: 0.96, metalness: 0 });
+  return patchStandard(m, 'ground', {
+    fragPars: 'uniform sampler2D uVital, uGroundBake, uMossBake;',
+    color: /* glsl */ `
+      vec2 guv = vPos.xz*${INV}+0.5;
+      vec4 gb = texture2D(uGroundBake, guv);
+      vec4 vt = texture2D(uVital, guv);
+      float hgt = gb.a*1.3;
+      float mAmt = smoothstep(0.08,0.5, vt.r + (texture2D(uMossBake, guv).r-0.5)*0.5);
       vec3 mossU = mix(vec3(0.020,0.045,0.014), vec3(0.02,0.085,0.07), vt.g);
-      float hgt = n2*0.5 + n3*0.3 + fl*0.5;
-      diffuseColor.rgb = mix(soil, mossU*(0.6+0.8*n2), mAmt*0.94);`,
+      diffuseColor.rgb = mix(gb.rgb*gb.rgb, mossU*(0.6+0.8*gb.a), mAmt*0.94);`,
     normal: 'normal = bumpN(normal, hgt, 0.01);',
   }, U);
 }

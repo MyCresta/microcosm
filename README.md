@@ -36,7 +36,7 @@ The speed button cycles 1×, 3× and 8×. Left alone, the view slowly turns on i
 
 Add to the URL: `?q=low` for a lighter render (no MSAA or depth of field, fewer moss layers), `?seed=123` for a different island, `?night=1` to start at night.
 
-The page never shades more than about 2.2 megapixels, and if it averages under roughly 45 fps it steps quality down by itself: resolution first, then anti-aliasing, depth of field and moss layers. `?lock` turns that off.
+The page aims to hold 60 fps. It never shades more than about 2.2 megapixels, and the scene's render scale follows the load: when frames start arriving late it drops a notch straight away, and it creeps back up once things are calm (the fps counter shows the scale whenever it is below 100%). Only if the scale reaches its 60% floor do features go: anti-aliasing, then depth of field, then moss layers. `?lock` turns all of that off.
 
 ## Layout
 
